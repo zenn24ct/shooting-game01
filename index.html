@@ -1,12 +1,331 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ja">
 <head>
-<meta charset="UTF-8">
-<title>演習ページ</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Cute Colorful Shooting Game</title>
+  <style>
+    :root{
+      --bg-1: #FFF7FB; /* pale pink */
+      --bg-2: #F5FFFB; /* pale mint */
+      --panel: rgba(255,255,255,0.85);
+      --accent: #FF8AC4; /* pink */
+      --accent-2: #7AE7C7; /* mint */
+      --accent-3: #FFD27A; /* yellow */
+      --danger: #FF6B6B;
+      --text: #263238;
+      --glass: rgba(255,255,255,0.7);
+    }
+    html,body{height:100%;margin:0;font-family: 'Noto Sans JP', system-ui, -apple-system, 'Hiragino Kaku Gothic ProN', 'メイリオ', sans-serif;background:linear-gradient(180deg,var(--bg-1),var(--bg-2));color:var(--text)}
+    #game-root{display:flex;flex-direction:column;align-items:center;gap:12px;padding:16px;box-sizing:border-box}
+    canvas{background:linear-gradient(180deg, rgba(255,255,255,0.6) 0%, rgba(255,255,255,0.3) 100%);border-radius:18px;box-shadow:0 12px 40px rgba(38,50,56,0.08);max-width:100%;height:auto;border:6px solid rgba(255,255,255,0.6)}
+    .hud{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+    .panel{background:var(--panel);padding:8px 12px;border-radius:14px;font-size:14px;display:flex;align-items:center;gap:8px;box-shadow:0 6px 18px rgba(38,50,56,0.06)}
+    .panel .badge{width:28px;height:28px;border-radius:8px;display:inline-grid;place-items:center;font-weight:700}
+    #startBtn, button{background:linear-gradient(90deg,var(--accent),var(--accent-2));color:white;border:none;padding:8px 14px;border-radius:12px;font-weight:700;cursor:pointer;box-shadow:0 8px 18px rgba(122,231,199,0.18)}
+    #muteBtn{background:transparent;border:none;font-size:20px;cursor:pointer}
+    .center{display:flex;gap:8px;align-items:center}
+    #touch-controls{display:none;gap:12px}
+    .tc-btn{width:64px;height:64px;border-radius:18px;background:linear-gradient(180deg,rgba(255,255,255,0.9),rgba(255,255,255,0.75));display:flex;align-items:center;justify-content:center;font-weight:700;box-shadow:0 8px 20px rgba(38,50,56,0.05)}
+    .small{font-size:12px;color:rgba(38,50,56,0.7)}
+    @media (max-width:700px){
+      #touch-controls{display:flex}
+      canvas{width:100%;height:60vh}
+    }
+  </style>
 </head>
 <body>
-<h1>OrbStack × Ubuntu × Apache 演習ページ</h1>
-<p>高見桔花</p>
-<p>2312110087</p>
+  <div id="game-root">
+    <div class="hud">
+      <div class="panel"><div class="badge" style="background:linear-gradient(180deg,var(--accent),#FFB3E0)">⭐</div>Score: <strong id="score">0</strong></div>
+      <div class="panel"><div class="badge" style="background:linear-gradient(180deg,var(--accent-2),#CFFFEF)">💗</div>Lives: <span id="lives">3</span></div>
+      <div class="panel"><div class="badge" style="background:linear-gradient(180deg,var(--accent-3),#FFE9B8)">🌈</div>Level: <span id="level">1</span></div>
+      <div style="margin-left:12px"></div>
+      <button id="startBtn">Start / Restart</button>
+      <button id="muteBtn">🔊</button>
+    </div>
+
+    <canvas id="gameCanvas" width="800" height="600"></canvas>
+
+    <div id="touch-controls">
+      <div class="tc-btn" id="leftBtn">◀</div>
+      <div class="tc-btn" id="shootBtn">💥</div>
+      <div class="tc-btn" id="rightBtn">▶</div>
+    </div>
+
+    <div class="small">Keyboard: ← → or A/D to move, Space to shoot. Mobile: use buttons below.</div>
+  </div>
+
+<script>
+/* Cute colorful version
+   - pastel palette
+   - rounded/cute enemies and player (with face)
+   - colorful bullets, particles, pop confetti on kill
+   - small polish on HUD
+*/
+
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+let W = canvas.width, H = canvas.height;
+
+// HUD elements
+const scoreEl = document.getElementById('score');
+const livesEl = document.getElementById('lives');
+const levelEl = document.getElementById('level');
+const startBtn = document.getElementById('startBtn');
+const muteBtn = document.getElementById('muteBtn');
+
+// Touch controls
+const leftBtn = document.getElementById('leftBtn');
+const rightBtn = document.getElementById('rightBtn');
+const shootBtn = document.getElementById('shootBtn');
+
+let keys = {};
+let touchState = { left:false, right:false, shoot:false };
+let lastTime = 0;
+let accumulator = 0;
+let dt = 1/60;
+
+let game = null;
+let muted = false;
+
+class Sound {
+  constructor(){
+    try{ this.ctx = new (window.AudioContext || window.webkitAudioContext)(); }catch(e){ this.ctx = null }
+  }
+  play(freq=440, type='sine', time=0.06, vol=0.08){
+    if(muted||!this.ctx) return;
+    const o = this.ctx.createOscillator();
+    const g = this.ctx.createGain();
+    o.type = type; o.frequency.value = freq;
+    g.gain.value = vol;
+    o.connect(g); g.connect(this.ctx.destination);
+    o.start();
+    g.gain.exponentialRampToValueAtTime(0.0001, this.ctx.currentTime + time);
+    o.stop(this.ctx.currentTime + time + 0.01);
+  }
+}
+const sfx = new Sound();
+
+class Vec{ constructor(x,y){this.x=x;this.y=y} }
+
+// particle system for pop/confetti
+class Particle{
+  constructor(x,y, vx, vy, life, size, color){ this.x=x; this.y=y; this.vx=vx; this.vy=vy; this.life=life; this.size=size; this.color=color; }
+  update(dt){ this.life -= dt; this.x += this.vx*dt; this.y += this.vy*dt; this.vy += 220*dt; }
+  draw(ctx){ if(this.life<=0) return; ctx.globalAlpha = Math.max(0, Math.min(1, this.life)); ctx.fillStyle = this.color; ctx.beginPath(); ctx.arc(this.x,this.y,this.size,0,Math.PI*2); ctx.fill(); ctx.globalAlpha=1; }
+}
+let particles = [];
+function spawnConfetti(x,y,count=12){ const colors = ['#FFB3E0','#7AE7C7','#FFD27A','#A5A7FF','#FF9AA2']; for(let i=0;i<count;i++){ const ang = Math.random()*Math.PI*2; const sp = 120+Math.random()*160; particles.push(new Particle(x,y, Math.cos(ang)*sp, Math.sin(ang)*sp - 40, 0.9 + Math.random()*0.7, 4+Math.random()*3, colors[Math.floor(Math.random()*colors.length)])); } }
+
+class Player{
+  constructor(x,y){ this.pos=new Vec(x,y); this.radius=18; this.speed=380; this.color='#FF9AD6'; this.cooldown=0; }
+  update(dt){
+    const move = (keys['ArrowLeft']||keys['a']||touchState.left) ? -1 : (keys['ArrowRight']||keys['d']||touchState.right)?1:0;
+    this.pos.x += move * this.speed * dt;
+    this.pos.x = Math.max(this.radius, Math.min(W - this.radius, this.pos.x));
+    this.cooldown = Math.max(0, this.cooldown - dt);
+    if((keys[' ']||touchState.shoot) && this.cooldown<=0){ this.shoot(); this.cooldown = 0.14; }
+  }
+  shoot(){
+    // rainbow burst: spawn 3 colored bullets
+    const colors = ['#FFD27A','#A5A7FF','#7AE7C7'];
+    for(let i=0;i<3;i++){ const bx = this.pos.x + (i-1)*8; game.bullets.push(new Bullet(bx, this.pos.y - this.radius - 6, -620, colors[i], -20 + i*20)); }
+    sfx.play(980, 'square', 0.05, 0.08);
+  }
+  draw(ctx){
+    ctx.save(); ctx.translate(this.pos.x, this.pos.y);
+    // shadow
+    ctx.beginPath(); ctx.ellipse(0,16,26,8,0,0,Math.PI*2); ctx.fillStyle='rgba(0,0,0,0.08)'; ctx.fill();
+    // body (cute ship)
+    ctx.beginPath(); ctx.moveTo(-18,4); ctx.quadraticCurveTo(0,-26,18,4); ctx.quadraticCurveTo(0,26,-18,4); ctx.fillStyle=this.color; ctx.fill();
+    // face
+    ctx.fillStyle='#1f2d3d'; ctx.beginPath(); ctx.arc(-6,2,3,0,Math.PI*2); ctx.fill(); ctx.beginPath(); ctx.arc(6,2,3,0,Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(0,8,6,0,Math.PI); ctx.strokeStyle='rgba(31,45,61,0.6)'; ctx.lineWidth=2; ctx.stroke();
+    // little sparkle
+    ctx.fillStyle='rgba(255,255,255,0.6)'; ctx.beginPath(); ctx.arc(10,-6,3,0,Math.PI*2); ctx.fill();
+    ctx.restore();
+  }
+}
+
+class Bullet{
+  constructor(x,y,vy, color='#FFD27A', vx=0){ this.pos=new Vec(x,y); this.vy=vy; this.vx=vx; this.r=6; this.color=color; }
+  update(dt){ this.pos.y += this.vy*dt; this.pos.x += this.vx*dt; }
+  draw(ctx){ ctx.save(); ctx.beginPath(); ctx.shadowBlur = 8; ctx.shadowColor = this.color; ctx.fillStyle = this.color; ctx.arc(this.pos.x,this.pos.y,this.r,0,Math.PI*2); ctx.fill(); ctx.restore(); }
+}
+
+class Enemy{
+  constructor(x,y,vy,health=1){ this.pos=new Vec(x,y); this.vy=vy; this.r=20; this.health=health; this.hitTime=0; this.color = (Math.random()<0.5)? '#FFA7A7' : '#A5C8FF'; this.type = Math.random()<0.12? 'big' : 'cute'; }
+  update(dt){ this.pos.y += this.vy*dt; this.hitTime = Math.max(0, this.hitTime-dt); }
+  draw(ctx){ ctx.save(); ctx.translate(this.pos.x,this.pos.y);
+    // shadow
+    ctx.beginPath(); ctx.ellipse(0,18,26,8,0,0,Math.PI*2); ctx.fillStyle='rgba(0,0,0,0.06)'; ctx.fill();
+    // main body (rounded blob)
+    ctx.beginPath(); ctx.ellipse(0,0,this.r,this.r*0.9,0,0,Math.PI*2); ctx.fillStyle=this.color; ctx.fill();
+    // cute face
+    ctx.fillStyle='#2a2a2a'; ctx.beginPath(); ctx.arc(-6,-2,3,0,Math.PI*2); ctx.fill(); ctx.beginPath(); ctx.arc(6,-2,3,0,Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(0,6,5,0,Math.PI); ctx.strokeStyle='rgba(42,42,42,0.6)'; ctx.lineWidth=2; ctx.stroke();
+    // blush
+    ctx.fillStyle='rgba(255,255,255,0.4)'; ctx.beginPath(); ctx.ellipse(-9,4,4,2,0,0,Math.PI*2); ctx.fill(); ctx.beginPath(); ctx.ellipse(9,4,4,2,0,0,Math.PI*2); ctx.fill();
+    // hit flash
+    if(this.hitTime>0){ ctx.beginPath(); ctx.arc(0,0,this.r+4,0,Math.PI*2); ctx.strokeStyle='rgba(255,255,255,0.5)'; ctx.lineWidth=4; ctx.stroke(); }
+    // boss indicator
+    if(this.type==='big'){ ctx.fillStyle='rgba(0,0,0,0.06)'; ctx.fillRect(-this.r-6,-this.r-14,this.r*2+12,6); ctx.fillStyle='#fff'; ctx.font='10px sans-serif'; ctx.textAlign='center'; ctx.fillText('⭐',0,-this.r-10); }
+    ctx.restore(); }
+}
+
+class Game{
+  constructor(){ this.reset(); }
+  reset(){
+    this.player = new Player(W/2, H-70);
+    this.bullets = [];
+    this.enemies = [];
+    this.enemyTimer = 0;
+    this.score = 0; this.lives = 3; this.level = 1;
+    this.spawnRate = 1.1; this.enemySpeed = 60; this.running = false; this.gameOver=false;
+    updateHUD(this);
+  }
+  start(){ this.reset(); this.running=true; this.gameOver=false; }
+  update(dt){ if(!this.running) return;
+    this.player.update(dt);
+    // bullets
+    for(let b of this.bullets) b.update(dt);
+    this.bullets = this.bullets.filter(b=>b.pos.y> -20 && b.pos.y < H+20);
+    // enemies
+    this.enemyTimer -= dt;
+    if(this.enemyTimer<=0){ this.spawnEnemy(); this.enemyTimer = Math.max(0.25, this.spawnRate - Math.min(1.0,(this.level-1)*0.06)); }
+    for(let e of this.enemies) e.update(dt);
+    // collisions
+    this.checkCollisions();
+    // particle updates
+    for(let i=particles.length-1;i>=0;i--){ particles[i].update(dt); if(particles[i].life<=0) particles.splice(i,1); }
+    // enemy offscreen
+    for(let i=this.enemies.length-1;i>=0;i--){ if(this.enemies[i].pos.y > H+40){ this.enemies.splice(i,1); this.lives--; sfx.play(160,'sine',0.16,0.09); if(this.lives<=0) this.endGame(); updateHUD(this);} }
+    // level up
+    if(this.score >= this.level * 120){ this.levelUp(); }
+  }
+  spawnEnemy(){
+    const x = 30 + Math.random()*(W-60);
+    const vy = this.enemySpeed + Math.random()*50 + (this.level-1)*10;
+    const hp = (Math.random()<0.12) ? 3 : 1; // occasional tougher ones
+    const e = new Enemy(x, -40, vy, hp);
+    if(Math.random()<0.08){ e.type='big'; e.r = 28; e.color='#FFD7A8'; e.health = 4; }
+    this.enemies.push(e);
+  }
+  checkCollisions(){
+    for(let i=this.enemies.length-1;i>=0;i--){
+      const e = this.enemies[i];
+      // bullets hit
+      for(let j=this.bullets.length-1;j>=0;j--){
+        const b = this.bullets[j];
+        const dx = b.pos.x - e.pos.x, dy = b.pos.y - e.pos.y;
+        if(dx*dx + dy*dy < (b.r + e.r)*(b.r+ e.r)){
+          this.bullets.splice(j,1); e.health--; e.hitTime=0.12; sfx.play(1200 + Math.random()*200, 'sine', 0.04, 0.06);
+          // small pop particles
+          spawnConfetti(b.pos.x, b.pos.y, 6);
+          if(e.health<=0){ spawnConfetti(e.pos.x, e.pos.y, 18); this.enemies.splice(i,1); this.score += 10 + (e.type==='big'?20:0); updateHUD(this); sfx.play(540 + Math.random()*240, 'triangle', 0.12, 0.08); }
+          break;
+        }
+      }
+      // enemy hits player
+      const dxp = this.player.pos.x - e.pos.x, dyp = this.player.pos.y - e.pos.y;
+      if(dxp*dxp + dyp*dyp < (this.player.radius + e.r)*(this.player.radius + e.r)){
+        // collision
+        this.enemies.splice(i,1); this.lives--; spawnConfetti(this.player.pos.x, this.player.pos.y, 10); sfx.play(90,'sine',0.22,0.18); updateHUD(this);
+        if(this.lives<=0) this.endGame();
+      }
+    }
+  }
+  levelUp(){ this.level++; this.enemySpeed += 14; this.spawnRate = Math.max(0.28, this.spawnRate - 0.08); updateHUD(this); sfx.play(920,'sawtooth',0.12,0.08); }
+  endGame(){ this.running=false; this.gameOver=true; setTimeout(()=>{ alert('Game Over! Score: '+this.score); }, 80); }
+  draw(ctx){
+    // background: soft clouds
+    ctx.clearRect(0,0,W,H);
+    drawBackground(ctx);
+    // particles behind
+    for(let p of particles) p.draw(ctx);
+    // bullets
+    for(let b of this.bullets) b.draw(ctx);
+    // enemies
+    for(let e of this.enemies) e.draw(ctx);
+    // player
+    this.player.draw(ctx);
+    // floating UI overlay (subtle)
+    if(!this.running){ ctx.save(); ctx.fillStyle='rgba(255,255,255,0.6)'; ctx.fillRect(W/2-170,H/2-52,340,104); ctx.fillStyle='#333'; ctx.font='20px sans-serif'; ctx.textAlign='center'; ctx.fillText(this.gameOver?('Game Over — Score: '+this.score):'Paused', W/2, H/2+6); ctx.restore(); }
+  }
+}
+
+function drawBackground(ctx){
+  // gentle clouds
+  const g = ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0,'rgba(255,255,255,0.9)'); g.addColorStop(1,'rgba(255,255,255,0.6)');
+  ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
+  // soft floating circles
+  const t = Date.now()/2000;
+  for(let i=0;i<8;i++){
+    const x = (i*73 + Math.sin(t*(0.2+i*0.03))*40) % W; const y = (i*97 + Math.cos(t*(0.15+i*0.02))*20) % H;
+    ctx.beginPath(); ctx.fillStyle = (i%2===0)? 'rgba(255,180,220,0.22)' : 'rgba(180,245,220,0.18)'; ctx.ellipse(x,y,90,50,0,0,Math.PI*2); ctx.fill();
+  }
+}
+
+function updateHUD(g){ scoreEl.textContent = g.score; livesEl.textContent = g.lives; levelEl.textContent = g.level; }
+
+// Main loop
+function loop(ts){
+  if(!lastTime) lastTime = ts;
+  let frameTime = (ts - lastTime) / 1000; lastTime = ts;
+  if(frameTime > 0.2) frameTime = 0.2;
+  accumulator += frameTime;
+  while(accumulator >= dt){ if(game) game.update(dt); accumulator -= dt; }
+  if(game) game.draw(ctx);
+  requestAnimationFrame(loop);
+}
+
+// Resize handling
+function fitCanvas(){
+  const ratio = window.devicePixelRatio || 1;
+  const maxW = Math.min(window.innerWidth - 40, 1000);
+  const maxH = Math.min(window.innerHeight - 140, 800);
+  const targetW = Math.max(360, Math.round(maxW));
+  const targetH = Math.max(360, Math.round(maxH * 0.75));
+  canvas.style.width = targetW + 'px';
+  canvas.style.height = targetH + 'px';
+  W = canvas.width; H = canvas.height;
+}
+
+// Input handlers
+window.addEventListener('keydown', e=>{ keys[e.key]=true; if(e.key===' '){ e.preventDefault(); } });
+window.addEventListener('keyup', e=>{ keys[e.key]=false; });
+
+// touch controls events
+leftBtn.addEventListener('touchstart', e=>{ e.preventDefault(); touchState.left=true; });
+leftBtn.addEventListener('touchend', e=>{ e.preventDefault(); touchState.left=false; });
+rightBtn.addEventListener('touchstart', e=>{ e.preventDefault(); touchState.right=true; });
+rightBtn.addEventListener('touchend', e=>{ e.preventDefault(); touchState.right=false; });
+shootBtn.addEventListener('touchstart', e=>{ e.preventDefault(); touchState.shoot=true; });
+shootBtn.addEventListener('touchend', e=>{ e.preventDefault(); touchState.shoot=false; });
+
+// mouse: click to shoot + drag to move
+let mouseDown=false;
+canvas.addEventListener('mousedown', e=>{ mouseDown=true; const rect=canvas.getBoundingClientRect(); const x=(e.clientX-rect.left)*(canvas.width/rect.width); game.player.pos.x = x; game.player.shoot(); });
+canvas.addEventListener('mousemove', e=>{ if(!mouseDown) return; const rect=canvas.getBoundingClientRect(); const x=(e.clientX-rect.left)*(canvas.width/rect.width); game.player.pos.x = x; });
+canvas.addEventListener('mouseup', e=>{ mouseDown=false; });
+canvas.addEventListener('mouseleave', e=>{ mouseDown=false; });
+
+startBtn.addEventListener('click', ()=>{ if(!game) return; game.start(); });
+muteBtn.addEventListener('click', ()=>{ muted = !muted; muteBtn.textContent = muted? '🔈' : '🔊'; });
+
+// initialize
+function init(){
+  canvas.width = 800; canvas.height = 600; W = canvas.width; H = canvas.height;
+  game = new Game();
+  fitCanvas();
+  window.addEventListener('resize', fitCanvas);
+  requestAnimationFrame(loop);
+}
+
+init();
+
+</script>
 </body>
 </html>
