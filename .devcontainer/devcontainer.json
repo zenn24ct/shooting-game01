@@ -1,0 +1,17 @@
+{
+  "name": "Cute Shooter Dev",
+  "image": "mcr.microsoft.com/vscode/devcontainers/javascript-node:0-20",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:1": {}
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ritwickdey.LiveServer",
+        "esbenp.prettier-vscode"
+      ]
+    }
+  },
+  "forwardPorts": [5500],
+  "postCreateCommand": "echo 'devcontainer ready'"
+}
